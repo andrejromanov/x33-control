@@ -360,13 +360,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addLightItems(_ s: MouseSettings) {
         if let light = s.light {
-            let lighting = submenu("Lighting · " + (light.isOn ? light.modeLabel : "Off"))
+            let lighting = submenu("Lighting · " + light.modeLabel)
             for mode in LightSettings.Mode.allCases {
-                let on = light.isOn ? light.knownMode == mode : mode == .off
-                lighting.addItem(item(mode.label, state: on) { [weak self] in
+                lighting.addItem(item(mode.label, state: light.knownMode == mode) { [weak self] in
                     var l = light
                     l.mode = mode.rawValue
-                    l.enabled = mode != .off
                     self?.apply("lighting") { try self?.controller.setLight(l) }
                 })
             }

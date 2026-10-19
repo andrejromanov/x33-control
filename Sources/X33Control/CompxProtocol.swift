@@ -59,9 +59,14 @@ public enum Compx {
         /// Button table: 16 records of 4 bytes, see `ButtonAction`.
         public static let keyFunction = 0x60
         public static let buttonSlots = 16
-        /// Decorative light: [mode r g b speed brightness checksum].
-        public static let light = 0xa0
-        public static let lightState = 0xa7
+        /// Decorative light (the block the X-33 actually drives): colour record
+        /// [r g b checksum] at 0x54, then value/checksum pairs for mode (0x58),
+        /// brightness (0x5a) and speed (0x5c). 0xa0 holds a second, inert block.
+        public static let lightColor = 0x54
+        public static let lightMode = 0x58
+        public static let lightBrightness = 0x5a
+        public static let lightSpeed = 0x5c
+        public static let lightEnd = 0x5e
         /// Keyboard shortcut slots, 32 bytes each, one per button slot.
         public static let shortcutBase = 0x100
         public static let shortcutStride = 0x20
@@ -82,8 +87,8 @@ public enum Compx {
     public static let dpiMin = 50
     public static let dpiMax = 26000
     public static let dpiStep = 50
-    /// Decorative light speed presets (raw byte; lower is faster).
-    public static let lightSpeeds: [(label: String, value: UInt8)] = [("Slow", 0xbe), ("Medium", 0x80), ("Fast", 0x46), ("Fastest", 0x13)]
+    /// Decorative light speed, 1 (slowest) … 5 (fastest).
+    public static let lightSpeeds: [(label: String, value: UInt8)] = [("1 · Slowest", 1), ("2", 2), ("3", 3), ("4", 4), ("5 · Fastest", 5)]
     /// Decorative light brightness presets (percent → raw byte).
     public static let lightBrightnessPercents = [25, 50, 75, 100]
     public static func encodeLightBrightness(percent: Int) -> UInt8 {
@@ -199,18 +204,17 @@ public struct RGB: Equatable {
     public var name: String { RGB.presets.first { $0.color == self }?.name ?? "#" + hex }
 }
 
-/// Decorative (logo / side) light. Mode numbers follow the Redragon/E-Yooso
-/// firmware family (open-m711pro): 0 streaming, 1 breathing, 2 steady, 3 neon, 4 off.
+/// Decorative (side / logo) light. Verified on the X-33: this block at 0x54
+/// drives the light; the 0xa0 block used by other Compx firmware is ignored.
 public struct LightSettings: Equatable {
     public enum Mode: UInt8, CaseIterable {
-        case streaming = 0, breathing = 1, steady = 2, neon = 3, off = 4
+        case off = 0, steady = 1, breathing = 2, rainbow = 3
         public var label: String {
             switch self {
-            case .streaming: return "Rainbow Wave"
-            case .breathing: return "Breathing"
-            case .steady: return "Steady"
-            case .neon: return "Neon"
             case .off: return "Off"
+            case .steady: return "Steady"
+            case .breathing: return "Breathing"
+            case .rainbow: return "Rainbow"
             }
         }
         /// Whether the colour matters in this mode.
@@ -219,29 +223,27 @@ public struct LightSettings: Equatable {
 
     public var mode: UInt8
     public var color: RGB
-    public var speed: UInt8
-    public var brightness: UInt8
-    public var enabled: Bool
+    public var brightness: UInt8   // 0…255
+    public var speed: UInt8        // 1…5
 
-    public init(mode: UInt8, color: RGB, speed: UInt8, brightness: UInt8, enabled: Bool) {
-        self.mode = mode; self.color = color; self.speed = speed; self.brightness = brightness; self.enabled = enabled
+    public init(mode: UInt8, color: RGB, brightness: UInt8, speed: UInt8) {
+        self.mode = mode; self.color = color; self.brightness = brightness; self.speed = speed
     }
 
     public init?(flash: [UInt8]) {
-        let a = Compx.Flash.light
-        guard flash.count > Compx.Flash.lightState, flash[a] != 0xff else { return nil }
-        mode = flash[a]
-        color = RGB(flash[a + 1], flash[a + 2], flash[a + 3])
-        speed = flash[a + 4]
-        brightness = flash[a + 5]
-        enabled = flash[Compx.Flash.lightState] == 1
+        guard flash.count >= Compx.Flash.lightEnd, flash[Compx.Flash.lightMode] != 0xff else { return nil }
+        let c = Compx.Flash.lightColor
+        color = RGB(flash[c], flash[c + 1], flash[c + 2])
+        mode = flash[Compx.Flash.lightMode]
+        brightness = flash[Compx.Flash.lightBrightness]
+        speed = flash[Compx.Flash.lightSpeed]
     }
 
     public var knownMode: Mode? { Mode(rawValue: mode) }
-    public var isOn: Bool { enabled && knownMode != .off }
+    public var isOn: Bool { mode != Mode.off.rawValue }
+    /// The 10 bytes written at `Compx.Flash.lightColor`.
     public var record: [UInt8] {
-        let b = [mode, color.red, color.green, color.blue, speed, brightness]
-        return b + [Compx.checksum(b)]
+        color.record + [mode, Compx.checksum([mode]), brightness, Compx.checksum([brightness]), speed, Compx.checksum([speed])]
     }
     public var modeLabel: String { knownMode?.label ?? "Mode \(mode)" }
 }

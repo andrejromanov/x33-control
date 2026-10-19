@@ -13,14 +13,14 @@ useful parts on Apple Silicon Macs.
   scroll in four directions, fire key, polling-rate switch, light switch,
   disabled, a media key, or a keyboard shortcut (⌃ ⌥ ⇧ ⌘ plus one key,
   captured by pressing it in a dialog).
-- Lighting: decorative light mode (rainbow wave, breathing, steady, neon, off),
-  colour, brightness and speed; DPI indicator light (off, steady, breathing)
+- Lighting: decorative light mode (steady, breathing, rainbow, off), colour,
+  brightness and speed; DPI indicator light (off, steady, breathing)
   and the colour shown for each DPI stage.
 - Launch at login.
 - CLI mode for scripts: `X33Control --battery [--json]`, `--settings`,
   `--dump [hex-address] [hex-length]`, `--set polling 1000`,
   `--set button 16 key cmd+shift+a`, `--set button 15 media playpause`,
-  `--set button 6 fire 20 3`, `--set light steady 00ff00 128 50`,
+  `--set button 6 fire 20 3`, `--set light steady 00ff00 100 3` (colour, brightness %, speed 1–5),
   `--set dpilight breathing`, `--set dpicolor 1 ff8000`, `--raw 04` (send one
   frame), `--measure 5` (count real mouse reports to check the polling rate).
   Run it as
@@ -83,13 +83,14 @@ does. Macros (flash 0x300) are not implemented.
 
 ## Lighting
 
-The light block was written and read back on the X-33, but the mouse was
-not watched while doing it. Mode numbers (0 rainbow wave, 1 breathing,
-2 steady, 3 neon, 4 off) come from the Redragon M711 Pro, which uses the same
-vendor id and the same 7-byte light record with the same factory defaults. If
-a mode shows a different effect on your mouse, the names in
-`LightSettings.Mode` are the only thing to change. The factory state of the
-X-33 is "off" (mode 4, state 0), so nothing lights up until you pick a mode.
+The X-33 drives its decorative light from the flash block at 0x54: colour
+(`r g b checksum`), then mode (0 off, 1 steady, 2 breathing, 3 rainbow),
+brightness (0–255) and speed (1–5), each with its own checksum. Verified by
+eye: writing steady green there turns the light steady green. The block at
+0xa0 that other Compx firmware uses for the same purpose is ignored by this
+mouse. Every write burst ends with command 0x04 (the battery query doubles as
+the vendor software's "commit"), without which the mouse keeps showing the
+old effect. The factory setting is breathing purple (`601986`).
 
 ## Verified on hardware (2026-10-19/20, X-33 with receiver firmware 0x1312)
 
@@ -105,9 +106,9 @@ X-33 is "off" (mode 4, state 0), so nothing lights up until you pick a mode.
   version / RSSI / profile queries (status 1). The menu hides what the mouse
   does not have.
 - Button table and shortcut slots: a keyboard shortcut (⌘C) written to slot 16
-  came back byte for byte and the slot was restored to its factory keypad −;
-  the light record round-trips the same way. Flash reads answer status 1
-  unless host control (command 0x03) is active.
+  came back byte for byte and the slot was restored to its factory keypad −.
+  Flash reads answer status 1 unless host control (command 0x03) is active.
+- Light: steady green written to 0x54 shows on the mouse (2026-10-20).
 
 ## Protocol
 
@@ -118,7 +119,8 @@ Settings live in a flash map read/written with commands `0x08`/`0x07` in
 10-byte chunks, each value followed by its own `0x55 - value` checksum. See
 `Sources/X33Control/CompxProtocol.swift` and `ButtonMapping.swift`. The flash
 layout follows Compx's own web driver ("Control Hub": `KeyFunction` 0x60,
-`ShortcutKey` 0x100, `Light` 0xa0, `DPIColor` 0x2c, `DPIEffect` 0x4c) and the
+`ShortcutKey` 0x100, `DPIColor` 0x2c, `DPIEffect` 0x4c; the light block at 0x54
+is the M913-family layout from m913-ctl) and the
 open-m711pro and OpenMouse projects; every write is verified by reading the
 bytes back. A button record is `[type, param hi, param lo, checksum]`; a
 shortcut slot is an event list `[2n, (kind|0x80, lo, hi)×n, (kind|0x40, lo,

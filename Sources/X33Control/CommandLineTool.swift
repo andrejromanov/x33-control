@@ -9,7 +9,7 @@ import Foundation
 ///   X33Control --measure [seconds]        count real mouse reports to verify the polling rate (move the mouse)
 ///   --output <path>                       write stdout/stderr to a file (for launching through `open`)
 enum CommandLineTool {
-    static let modes = ["--battery", "--settings", "--dump", "--raw", "--set", "--measure"]
+    static let modes = ["--battery", "--settings", "--dump", "--raw", "--write", "--set", "--measure"]
     private static var keepAlive: MouseController?
     private static var keepAliveMeter: PollingMeter?
 
@@ -84,6 +84,15 @@ enum CommandLineTool {
                 print("send: " + hex(frame))
                 let reply = try controller.transport.exchange(frame)
                 print("recv: " + hex(reply) + (Compx.isValid(reply) ? "" : "  (bad checksum)"))
+            case "--write":
+                // --write <hex address> <hex bytes…>: writes under host control, commits, reads back.
+                guard params.count >= 2, let address = Int(params[0].replacingOccurrences(of: "0x", with: ""), radix: 16) else {
+                    fputs("usage: --write <hex address> <hex bytes>\n", stderr); return 1
+                }
+                let data = params[1...].joined().replacingOccurrences(of: " ", with: "").hexBytes
+                guard !data.isEmpty else { fputs("error: no bytes\n", stderr); return 1 }
+                let back = try controller.writeRaw(address: address, data: data)
+                print(String(format: "%04x: ", address) + hex(back))
             case "--set":
                 try applySetting(controller, params)
                 print("ok")
@@ -136,18 +145,17 @@ enum CommandLineTool {
                 try c.setButton(slot: slot, action: a)
             }
         case "light":
-            // light <mode> [rrggbb|name] [speed 0-255] [brightness %]
+            // light <mode> [rrggbb|name] [brightness %] [speed 1-5]
             guard p.count > 1 else { throw CompxError.unsupportedValue("light needs a mode") }
-            var light = try c.readSettings().light ?? LightSettings(mode: 2, color: RGB(255, 0, 0), speed: 0x80, brightness: 0xff, enabled: true)
+            var light = try c.readSettings().light ?? LightSettings(mode: 1, color: RGB(255, 0, 0), brightness: 0xff, speed: 3)
             if let m = LightSettings.Mode.allCases.first(where: { $0.label.lowercased().replacingOccurrences(of: " ", with: "") == p[1].lowercased() }) {
                 light.mode = m.rawValue
             } else if let n = UInt8(p[1]) {
                 light.mode = n
             } else { throw CompxError.unsupportedValue("light mode \(p[1])") }
-            light.enabled = light.knownMode != .off
             if p.count > 2 { guard let c = parseColor(p[2]) else { throw CompxError.unsupportedValue("colour \(p[2])") }; light.color = c }
-            if p.count > 3 { light.speed = UInt8(try int(3) & 0xff) }
-            if p.count > 4 { light.brightness = Compx.encodeLightBrightness(percent: try int(4)) }
+            if p.count > 3 { light.brightness = Compx.encodeLightBrightness(percent: try int(3)) }
+            if p.count > 4 { light.speed = UInt8(min(max(try int(4), 1), 5)) }
             try c.setLight(light)
         case "dpilight":
             guard p.count > 1, let m = DpiLightSettings.Mode.allCases.first(where: { $0.label.lowercased() == p[1].lowercased() }) else {
@@ -236,7 +244,7 @@ enum CommandLineTool {
         print("Sleep after: \(s.sleepMinutes.map { "\($0) min" } ?? "unknown")")
         print("Motion sync: \(s.motionSync)  Angle snapping: \(s.angleSnapping)  Ripple control: \(s.rippleControl)")
         if let l = s.light {
-            print("Light: \(l.isOn ? l.modeLabel : "off") (mode \(l.mode), state \(l.enabled ? 1 : 0)) colour \(l.color.name) speed \(l.speed) brightness \(Compx.decodeLightBrightness(l.brightness))%")
+            print("Light: \(l.modeLabel) (mode \(l.mode)) colour \(l.color.name) brightness \(Compx.decodeLightBrightness(l.brightness))% speed \(l.speed)")
         }
         if let d = s.dpiLight {
             print("DPI indicator: \(d.effectiveMode.label) (mode \(d.mode), brightness \(d.brightness), speed \(d.speed)); stage colours " + s.dpiColors.map { $0.name }.joined(separator: ", "))

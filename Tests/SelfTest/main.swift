@@ -68,10 +68,11 @@ check(HIDKeys.usage(forMacKeyCode: 0) == 0x04 && HIDKeys.usage(forName: "f5") ==
 
 print("Lights")
 var lightFlash = [UInt8](repeating: 0xff, count: Compx.Flash.readEnd)
-lightFlash.replaceSubrange(0xa0..<0xa9, with: [0x04, 0xff, 0x00, 0x00, 0x13, 0xff, 0x40, 0x00, 0x55])
+lightFlash.replaceSubrange(0x54..<0x5e, with: [0x60, 0x19, 0x86, 0x56, 0x02, 0x53, 0xb4, 0xa1, 0x02, 0x53])
 let light = LightSettings(flash: lightFlash)
-check(light?.mode == 4 && light?.color == RGB(255, 0, 0) && light?.speed == 0x13 && light?.brightness == 0xff && light?.enabled == false, "factory light block parses")
-check(light?.record == [0x04, 0xff, 0x00, 0x00, 0x13, 0xff, 0x40], "light record checksum 0x40")
+check(light?.mode == 2 && light?.color == RGB(0x60, 0x19, 0x86) && light?.brightness == 0xb4 && light?.speed == 2, "factory light block parses (breathing purple)")
+check(light?.record == [0x60, 0x19, 0x86, 0x56, 0x02, 0x53, 0xb4, 0xa1, 0x02, 0x53], "light record round-trips")
+check(LightSettings(mode: 1, color: RGB(0, 255, 0), brightness: 0xff, speed: 3).record == [0x00, 0xff, 0x00, 0x56, 0x01, 0x54, 0xff, 0x56, 0x03, 0x52], "steady green record (verified on the mouse)")
 check(RGB(hex: "#ff8000") == RGB(255, 128, 0) && RGB(255, 0, 0).record == [0xff, 0, 0, 0x56], "rgb parsing and record")
 check(Compx.encodeLightBrightness(percent: 100) == 0xff && Compx.decodeLightBrightness(0x80) == 50, "brightness scale")
 

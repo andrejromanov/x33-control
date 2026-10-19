@@ -51,6 +51,14 @@ public final class MouseController {
         try withHostControl { try readFlash(address: address, length: length) }
     }
 
+    /// Writes arbitrary bytes (for protocol experiments) and returns what the mouse holds afterwards.
+    public func writeRaw(address: Int, data: [UInt8]) throws -> [UInt8] {
+        try withHostControl {
+            try writeFlash(address: address, data: data)
+            return try readFlash(address: address, length: data.count)
+        }
+    }
+
     // MARK: Writes (each one is verified by reading the byte back)
 
     public func setPollingRate(_ hz: Int) throws {
@@ -173,11 +181,9 @@ public final class MouseController {
 
     public func setLight(_ light: LightSettings) throws {
         try withHostControl {
-            let state: UInt8 = light.enabled ? 1 : 0
-            try writeFlash(address: Compx.Flash.light, data: light.record)
-            try writeFlash(address: Compx.Flash.lightState, data: [state, Compx.checksum([state])])
-            let back = try readFlash(address: Compx.Flash.light, length: 8)
-            guard Array(back[0..<7]) == light.record, back[7] == state else { throw CompxError.verifyFailed("lighting") }
+            try writeFlash(address: Compx.Flash.lightColor, data: light.record)
+            let back = try readFlash(address: Compx.Flash.lightColor, length: light.record.count)
+            guard back == light.record else { throw CompxError.verifyFailed("lighting") }
         }
     }
 
@@ -215,11 +221,21 @@ public final class MouseController {
         return reply
     }
 
+    private var wroteFlash = false
+
     /// Tells the receiver the host is configuring the mouse, runs `body`, then releases.
+    /// After flash writes it sends the "commit" frame (command 0x04, the same one
+    /// the vendor software ends every write burst with) so the mouse applies them.
     private func withHostControl<T>(_ body: () throws -> T) throws -> T {
         try setHostControl(true)
         defer { try? setHostControl(false) }
-        return try body()
+        wroteFlash = false
+        let result = try body()
+        if wroteFlash {
+            wroteFlash = false
+            _ = try? query(.battery)
+        }
+        return result
     }
 
     /// The "online" flag in the reply is unreliable right after the mouse wakes
@@ -252,6 +268,7 @@ public final class MouseController {
     }
 
     private func writeFlash(address: Int, data: [UInt8]) throws {
+        wroteFlash = true
         var offset = 0
         while offset < data.count {
             let chunk = Array(data[offset..<min(offset + Compx.maxPayload, data.count)])

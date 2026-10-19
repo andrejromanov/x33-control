@@ -311,6 +311,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        addButtonItems(s)
+        addLightItems(s)
+
         menu.addItem(item("Motion Sync", state: s.motionSync) { [weak self] in
             self?.apply("motion sync") { try self?.controller.setMotionSync(!s.motionSync) }
         })
@@ -320,6 +323,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Ripple Control", state: s.rippleControl) { [weak self] in
             self?.apply("ripple control") { try self?.controller.setRippleControl(!s.rippleControl) }
         })
+    }
+
+    /// Factory assignment of each slot, used to name the physical buttons.
+    private static let slotNames: [String] = [
+        "Side 1 (⌃↑)", "Side 2 (⌃←)", "Side 3 (⌃→)", "Side 4 (Back)", "Side 5 (Forward)", "Side 6 (key 6)",
+        "Right Button", "Left Button", "Side 7 (key 7)", "Side 8 (key 8)", "Middle Button", "Top (Fire Key)",
+        "Side 9 (key 9)", "Side 10 (key 0)", "Side 11 (keypad +)", "Side 12 (keypad −)",
+    ]
+
+    private func addButtonItems(_ s: MouseSettings) {
+        let buttons = submenu("Buttons")
+        for slot in 0..<s.buttons.count {
+            let per = NSMenu()
+            for choice in ButtonAction.simpleChoices {
+                per.addItem(item(choice.label, state: s.buttons[slot] == choice) { [weak self] in
+                    self?.apply("button \(slot + 1)") { try self?.controller.setButton(slot: slot, action: choice) }
+                })
+            }
+            per.addItem(.separator())
+            let current = s.buttons[slot] == .shortcut ? s.shortcuts[slot] : nil
+            per.addItem(item("Keyboard Shortcut…" + (current.map { c in c.presses.contains { if case .media = $0 { return false } else { return true } } ? " · \(c.label)" : "" } ?? "")) { [weak self] in
+                self?.promptShortcut(slot: slot)
+            })
+            let media = NSMenu()
+            for m in HIDKeys.media {
+                media.addItem(item(m.name, state: current == Shortcut(media: m.usage)) { [weak self] in
+                    self?.apply("button \(slot + 1)") { try self?.controller.setShortcut(slot: slot, Shortcut(media: m.usage)) }
+                })
+            }
+            per.addItem(entry("Media Key", media))
+            let name = slot < Self.slotNames.count ? Self.slotNames[slot] : "Button \(slot + 1)"
+            buttons.addItem(entry("\(slot + 1) · \(name) · \(s.buttonLabel(slot))", per))
+        }
+    }
+
+    private func addLightItems(_ s: MouseSettings) {
+        if let light = s.light {
+            let lighting = submenu("Lighting · " + (light.isOn ? light.modeLabel : "Off"))
+            for mode in LightSettings.Mode.allCases {
+                let on = light.isOn ? light.knownMode == mode : mode == .off
+                lighting.addItem(item(mode.label, state: on) { [weak self] in
+                    var l = light
+                    l.mode = mode.rawValue
+                    l.enabled = mode != .off
+                    self?.apply("lighting") { try self?.controller.setLight(l) }
+                })
+            }
+            lighting.addItem(.separator())
+            lighting.addItem(entry("Color · \(light.color.name)", colorMenu(current: light.color) { [weak self] c in
+                var l = light
+                l.color = c
+                self?.apply("light colour") { try self?.controller.setLight(l) }
+            }))
+            let brightness = NSMenu()
+            for pct in Compx.lightBrightnessPercents {
+                brightness.addItem(item("\(pct)%", state: light.brightness == Compx.encodeLightBrightness(percent: pct)) { [weak self] in
+                    var l = light
+                    l.brightness = Compx.encodeLightBrightness(percent: pct)
+                    self?.apply("light brightness") { try self?.controller.setLight(l) }
+                })
+            }
+            lighting.addItem(entry("Brightness · \(Compx.decodeLightBrightness(light.brightness))%", brightness))
+            let speed = NSMenu()
+            for preset in Compx.lightSpeeds {
+                speed.addItem(item(preset.label, state: light.speed == preset.value) { [weak self] in
+                    var l = light
+                    l.speed = preset.value
+                    self?.apply("light speed") { try self?.controller.setLight(l) }
+                })
+            }
+            lighting.addItem(entry("Speed" + (Compx.lightSpeeds.first { $0.value == light.speed }.map { " · \($0.label)" } ?? ""), speed))
+        }
+
+        if let dpiLight = s.dpiLight {
+            let indicator = submenu("DPI Indicator · \(dpiLight.effectiveMode.label)")
+            for mode in DpiLightSettings.Mode.allCases {
+                indicator.addItem(item(mode.label, state: dpiLight.effectiveMode == mode) { [weak self] in
+                    self?.apply("DPI indicator") { try self?.controller.setDpiLight(mode: mode) }
+                })
+            }
+            indicator.addItem(.separator())
+            for (i, color) in s.dpiColors.enumerated() {
+                indicator.addItem(entry("Stage \(i + 1) · \(color.name)", colorMenu(current: color) { [weak self] c in
+                    self?.apply("DPI colour") { try self?.controller.setDpiColor(stage: i, c) }
+                }))
+            }
+        }
+    }
+
+    private func colorMenu(current: RGB, _ set: @escaping (RGB) -> Void) -> NSMenu {
+        let m = NSMenu()
+        for preset in RGB.presets {
+            m.addItem(item(preset.name, state: current == preset.color) { set(preset.color) })
+        }
+        m.addItem(.separator())
+        m.addItem(item("Custom…") { [weak self] in
+            guard let self, let c = self.promptColor(current: current) else { return }
+            set(c)
+        })
+        return m
     }
 
     // MARK: Actions
@@ -351,6 +454,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard alert.runModal() == .alertFirstButtonReturn, let dpi = Int(field.stringValue.trimmingCharacters(in: .whitespaces)) else { return }
         let rounded = max(Compx.dpiMin, min(Compx.dpiMax, (dpi / Compx.dpiStep) * Compx.dpiStep))
         apply("DPI") { [weak self] in try self?.controller.setDpi(stage: stage, dpi: rounded) }
+    }
+
+    private func promptColor(current: RGB) -> RGB? {
+        let alert = NSAlert()
+        alert.messageText = "Colour"
+        alert.informativeText = "Hex RGB, e.g. FF8800."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        field.stringValue = current.hex
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return RGB(hex: field.stringValue)
+    }
+
+    private func promptShortcut(slot: Int) {
+        let alert = NSAlert()
+        alert.messageText = "Shortcut for button \(slot + 1)"
+        alert.informativeText = "Press the key combination (⌃ ⌥ ⇧ ⌘ plus one key), then click Set."
+        let capture = KeyCaptureView()
+        alert.accessoryView = capture
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = capture
+        guard alert.runModal() == .alertFirstButtonReturn, let shortcut = capture.captured else { return }
+        apply("button \(slot + 1)") { [weak self] in try self?.controller.setShortcut(slot: slot, shortcut) }
     }
 
     private func confirmRestore() {
@@ -418,6 +550,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    private func entry(_ title: String, _ sub: NSMenu) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
     private func submenu(_ title: String) -> NSMenu {
         let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let sub = NSMenu()
@@ -433,6 +571,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.target = action
         item.state = state ? .on : .off
         return item
+    }
+}
+
+/// Records one key combination; sits inside the shortcut alert.
+final class KeyCaptureView: NSView {
+    private let text = NSTextField(labelWithString: "Waiting for keys…")
+    private(set) var captured: Shortcut?
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 32))
+        text.frame = bounds
+        text.alignment = .center
+        text.font = NSFont.systemFont(ofSize: 18)
+        addSubview(text)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) { record(event) }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
+        record(event)
+        return true
+    }
+
+    private func record(_ event: NSEvent) {
+        guard let usage = HIDKeys.usage(forMacKeyCode: event.keyCode) else {
+            text.stringValue = "That key cannot be stored"
+            return
+        }
+        var mods = Shortcut.Modifier()
+        let flags = event.modifierFlags
+        if flags.contains(.control) { mods.insert(.control) }
+        if flags.contains(.option) { mods.insert(.option) }
+        if flags.contains(.shift) { mods.insert(.shift) }
+        if flags.contains(.command) { mods.insert(.command) }
+        captured = Shortcut(modifiers: mods, key: usage)
+        text.stringValue = captured?.label ?? ""
     }
 }
 

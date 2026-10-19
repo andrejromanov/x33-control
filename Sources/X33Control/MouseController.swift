@@ -30,7 +30,14 @@ public final class MouseController {
 
     public func readSettings() throws -> MouseSettings {
         try withHostControl {
-            MouseSettings(flash: try readFlash(address: 0, length: Compx.Flash.readEnd))
+            var s = MouseSettings(flash: try readFlash(address: 0, length: Compx.Flash.readEnd))
+            for (slot, action) in s.buttons.enumerated() where action == .shortcut {
+                // A sleeping mouse would cost one timeout per slot, so stop at the first failure.
+                let read: Shortcut?
+                do { read = try readShortcutRaw(slot: slot) } catch { break }
+                if let sc = read { s.shortcuts[slot] = sc }
+            }
+            return s
         }
     }
 
@@ -40,8 +47,8 @@ public final class MouseController {
         return (mouse, dongle)
     }
 
-    public func dumpFlash(length: Int = 0x100) throws -> [UInt8] {
-        try withHostControl { try readFlash(address: 0, length: length) }
+    public func dumpFlash(address: Int = 0, length: Int = 0x100) throws -> [UInt8] {
+        try withHostControl { try readFlash(address: address, length: length) }
     }
 
     // MARK: Writes (each one is verified by reading the byte back)
@@ -101,6 +108,101 @@ public final class MouseController {
 
     public func restoreDefaults() throws {
         try withHostControl { _ = try query(.restoreDefaults) }
+    }
+
+    // MARK: Buttons and shortcuts
+
+    public func readShortcut(slot: Int) throws -> Shortcut? {
+        try withHostControl { try readShortcutRaw(slot: slot) }
+    }
+
+    public func setButton(slot: Int, action: ButtonAction) throws {
+        try checkSlot(slot)
+        try withHostControl {
+            try ensureLeftClickRemains(after: slot, action: action)
+            try writeButtonRecord(slot: slot, action: action)
+        }
+    }
+
+    public func setShortcut(slot: Int, _ shortcut: Shortcut) throws {
+        try checkSlot(slot)
+        guard !shortcut.presses.isEmpty, shortcut.presses.count <= Shortcut.maxEvents else {
+            throw CompxError.unsupportedValue("shortcut with \(shortcut.presses.count) keys")
+        }
+        try withHostControl {
+            try ensureLeftClickRemains(after: slot, action: .shortcut)
+            let base = Compx.Flash.shortcutBase + slot * Compx.Flash.shortcutStride
+            try writeFlash(address: base, data: shortcut.record)
+            guard try readShortcutRaw(slot: slot) == shortcut else { throw CompxError.verifyFailed("shortcut keys") }
+            try writeButtonRecord(slot: slot, action: .shortcut)
+        }
+    }
+
+    private func checkSlot(_ slot: Int) throws {
+        guard (0..<Compx.Flash.buttonSlots).contains(slot) else { throw CompxError.unsupportedValue("button \(slot + 1)") }
+    }
+
+    private func writeButtonRecord(slot: Int, action: ButtonAction) throws {
+        let address = Compx.Flash.keyFunction + slot * 4
+        try writeFlash(address: address, data: action.record)
+        let back = try readFlash(address: address, length: 4)
+        guard Array(back[0..<3]) == action.bytes else { throw CompxError.verifyFailed("button \(slot + 1)") }
+    }
+
+    /// The official software refuses a layout with no Left Click; so does this one.
+    private func ensureLeftClickRemains(after slot: Int, action: ButtonAction) throws {
+        if action == .mouse(.left) { return }
+        let table = try readFlash(address: Compx.Flash.keyFunction, length: Compx.Flash.buttonSlots * 4)
+        for i in 0..<Compx.Flash.buttonSlots where i != slot {
+            if ButtonAction(record: Array(table[i * 4..<i * 4 + 4])) == .mouse(.left) { return }
+        }
+        throw CompxError.unsupportedValue("removing the last Left Click")
+    }
+
+    private func readShortcutRaw(slot: Int) throws -> Shortcut? {
+        let base = Compx.Flash.shortcutBase + slot * Compx.Flash.shortcutStride
+        var bytes = try readFlash(address: base, length: Compx.maxPayload)
+        let needed = 1 + Int(bytes[0]) * 3 + 1
+        if bytes[0] != 0xff, needed > bytes.count, needed <= Compx.Flash.shortcutStride {
+            bytes += try readFlash(address: base + bytes.count, length: needed - bytes.count)
+        }
+        return Shortcut(record: bytes)
+    }
+
+    // MARK: Lights
+
+    public func setLight(_ light: LightSettings) throws {
+        try withHostControl {
+            let state: UInt8 = light.enabled ? 1 : 0
+            try writeFlash(address: Compx.Flash.light, data: light.record)
+            try writeFlash(address: Compx.Flash.lightState, data: [state, Compx.checksum([state])])
+            let back = try readFlash(address: Compx.Flash.light, length: 8)
+            guard Array(back[0..<7]) == light.record, back[7] == state else { throw CompxError.verifyFailed("lighting") }
+        }
+    }
+
+    public func setDpiLight(mode: DpiLightSettings.Mode, brightness: UInt8? = nil, speed: UInt8? = nil) throws {
+        try withHostControl {
+            let current = try readFlash(address: Compx.Flash.dpiLightMode, length: 8)
+            let b = brightness ?? (current[2] == 0xff ? 0x80 : current[2])
+            let sp = speed ?? (current[4] == 0xff ? 3 : current[4])
+            let state: UInt8 = mode == .off ? 0 : 1
+            var data: [UInt8] = []
+            for v in [mode.rawValue, b, sp, state] { data += [v, Compx.checksum([v])] }
+            try writeFlash(address: Compx.Flash.dpiLightMode, data: data)
+            let back = try readFlash(address: Compx.Flash.dpiLightMode, length: 8)
+            guard back == data else { throw CompxError.verifyFailed("DPI indicator") }
+        }
+    }
+
+    public func setDpiColor(stage: Int, _ color: RGB) throws {
+        guard (0..<Compx.Flash.maxDpiStages).contains(stage) else { throw CompxError.unsupportedValue("stage \(stage + 1)") }
+        try withHostControl {
+            let address = Compx.Flash.dpiColors + stage * 4
+            try writeFlash(address: address, data: color.record)
+            let back = try readFlash(address: address, length: 4)
+            guard back == color.record else { throw CompxError.verifyFailed("DPI colour") }
+        }
     }
 
     // MARK: Protocol helpers

@@ -69,9 +69,11 @@ enum CommandLineTool {
             case "--settings":
                 printSettings(try controller.readSettings(), controller.readFirmware(), json: json)
             case "--dump":
-                let flash = try controller.dumpFlash()
+                let start = params.count > 0 ? Int(params[0].replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0 : 0
+                let length = params.count > 1 ? Int(params[1].replacingOccurrences(of: "0x", with: ""), radix: 16) ?? 0x100 : 0x100
+                let flash = try controller.dumpFlash(address: start, length: length)
                 for row in stride(from: 0, to: flash.count, by: 16) {
-                    print(String(format: "%04x: ", row) + hex(flash[row..<min(row + 16, flash.count)]))
+                    print(String(format: "%04x: ", start + row) + hex(flash[row..<min(row + 16, flash.count)]))
                 }
             case "--raw":
                 var frame = params.joined().replacingOccurrences(of: " ", with: "").hexBytes
@@ -117,8 +119,96 @@ enum CommandLineTool {
         case "anglesnap": try c.setAngleSnapping(try flag(1))
         case "ripple": try c.setRippleControl(try flag(1))
         case "restore": try c.restoreDefaults()
+        case "button":
+            let slot = try int(1) - 1
+            guard p.count > 2 else { throw CompxError.unsupportedValue("button needs an action") }
+            switch p[2].lowercased() {
+            case "key":
+                guard p.count > 3, let sc = parseShortcut(p[3]) else { throw CompxError.unsupportedValue("key combination \(p.count > 3 ? p[3] : "")") }
+                try c.setShortcut(slot: slot, sc)
+            case "media":
+                guard p.count > 3, let m = HIDKeys.media.first(where: { $0.name.lowercased().replacingOccurrences(of: " ", with: "") == p[3].lowercased() }) else {
+                    throw CompxError.unsupportedValue("media key \(p.count > 3 ? p[3] : ""). Known: " + HIDKeys.media.map { $0.name.replacingOccurrences(of: " ", with: "") }.joined(separator: ", "))
+                }
+                try c.setShortcut(slot: slot, Shortcut(media: m.usage))
+            default:
+                guard let a = parseAction(Array(p[2...])) else { throw CompxError.unsupportedValue("button action \(p[2])") }
+                try c.setButton(slot: slot, action: a)
+            }
+        case "light":
+            // light <mode> [rrggbb|name] [speed 0-255] [brightness %]
+            guard p.count > 1 else { throw CompxError.unsupportedValue("light needs a mode") }
+            var light = try c.readSettings().light ?? LightSettings(mode: 2, color: RGB(255, 0, 0), speed: 0x80, brightness: 0xff, enabled: true)
+            if let m = LightSettings.Mode.allCases.first(where: { $0.label.lowercased().replacingOccurrences(of: " ", with: "") == p[1].lowercased() }) {
+                light.mode = m.rawValue
+            } else if let n = UInt8(p[1]) {
+                light.mode = n
+            } else { throw CompxError.unsupportedValue("light mode \(p[1])") }
+            light.enabled = light.knownMode != .off
+            if p.count > 2 { guard let c = parseColor(p[2]) else { throw CompxError.unsupportedValue("colour \(p[2])") }; light.color = c }
+            if p.count > 3 { light.speed = UInt8(try int(3) & 0xff) }
+            if p.count > 4 { light.brightness = Compx.encodeLightBrightness(percent: try int(4)) }
+            try c.setLight(light)
+        case "dpilight":
+            guard p.count > 1, let m = DpiLightSettings.Mode.allCases.first(where: { $0.label.lowercased() == p[1].lowercased() }) else {
+                throw CompxError.unsupportedValue("dpilight off|steady|breathing")
+            }
+            try c.setDpiLight(mode: m)
+        case "dpicolor":
+            guard p.count > 2, let color = parseColor(p[2]) else { throw CompxError.unsupportedValue("dpicolor <stage> <rrggbb|name>") }
+            try c.setDpiColor(stage: try int(1) - 1, color)
         default: throw CompxError.unsupportedValue("setting \(p.first ?? "")")
         }
+    }
+
+    static func parseColor(_ text: String) -> RGB? {
+        RGB.presets.first { $0.name.lowercased() == text.lowercased() }?.color ?? RGB(hex: text)
+    }
+
+    static func parseAction(_ p: [String]) -> ButtonAction? {
+        func n(_ i: Int, _ fallback: Int) -> Int { i < p.count ? Int(p[i]) ?? fallback : fallback }
+        switch p[0].lowercased() {
+        case "left": return .mouse(.left)
+        case "right": return .mouse(.right)
+        case "middle": return .mouse(.middle)
+        case "back": return .mouse(.back)
+        case "forward": return .mouse(.forward)
+        case "dpiloop": return .dpi(.loop)
+        case "dpi+", "dpiup": return .dpi(.up)
+        case "dpi-", "dpidown": return .dpi(.down)
+        case "scrollleft": return .scroll(.left)
+        case "scrollright": return .scroll(.right)
+        case "scrollup": return .scroll(.up)
+        case "scrolldown": return .scroll(.down)
+        case "fire": return .fire(intervalMs: n(1, 20), times: n(2, 3))
+        case "polling": return .pollingRateSwitch
+        case "light": return .lightSwitch
+        case "profile": return .profileSwitch
+        case "disable", "off": return .disabled
+        default: return nil
+        }
+    }
+
+    /// "cmd+shift+a", "ctrl+up", "f5", "playpause" (media names without spaces).
+    static func parseShortcut(_ text: String) -> Shortcut? {
+        var mods = Shortcut.Modifier()
+        var key: UInt8?
+        for part in text.lowercased().split(separator: "+").map(String.init) {
+            switch part {
+            case "cmd", "command", "gui", "win", "super": mods.insert(.command)
+            case "ctrl", "control": mods.insert(.control)
+            case "alt", "option", "opt": mods.insert(.option)
+            case "shift": mods.insert(.shift)
+            default:
+                guard key == nil, let u = HIDKeys.usage(forName: part) else { return nil }
+                key = u
+            }
+        }
+        if let key { return Shortcut(modifiers: mods, key: key) }
+        if let m = HIDKeys.media.first(where: { $0.name.lowercased().replacingOccurrences(of: " ", with: "") == text.lowercased() }) {
+            return Shortcut(media: m.usage)
+        }
+        return nil
     }
 
     private static func printSettings(_ s: MouseSettings, _ fw: (mouse: String?, dongle: String?), json: Bool) {
@@ -130,7 +220,9 @@ enum CommandLineTool {
             "liftOffDistanceMM": \(s.liftOffDistanceMM.map(String.init) ?? "null"), "debounceMs": \(s.debounceMs.map(String.init) ?? "null"), \
             "sleepMinutes": \(s.sleepMinutes.map(String.init) ?? "null"), "motionSync": \(s.motionSync), \
             "angleSnapping": \(s.angleSnapping), "rippleControl": \(s.rippleControl), \
-            "firmwareMouse": \(fw.mouse.map { "\"\($0)\"" } ?? "null"), "firmwareDongle": \(fw.dongle.map { "\"\($0)\"" } ?? "null")}
+            "firmwareMouse": \(fw.mouse.map { "\"\($0)\"" } ?? "null"), "firmwareDongle": \(fw.dongle.map { "\"\($0)\"" } ?? "null"), \
+            "buttons": [\((0..<s.buttons.count).map { "\"\(s.buttonLabel($0))\"" }.joined(separator: ", "))], \
+            "light": \(s.light.map { "{\"on\": \($0.isOn), \"mode\": \($0.mode), \"color\": \"\($0.color.hex)\", \"speed\": \($0.speed), \"brightness\": \($0.brightness)}" } ?? "null")}
             """)
             return
         }
@@ -143,6 +235,16 @@ enum CommandLineTool {
         print("Debounce: \(s.debounceMs.map { "\($0) ms" } ?? "unknown")")
         print("Sleep after: \(s.sleepMinutes.map { "\($0) min" } ?? "unknown")")
         print("Motion sync: \(s.motionSync)  Angle snapping: \(s.angleSnapping)  Ripple control: \(s.rippleControl)")
+        if let l = s.light {
+            print("Light: \(l.isOn ? l.modeLabel : "off") (mode \(l.mode), state \(l.enabled ? 1 : 0)) colour \(l.color.name) speed \(l.speed) brightness \(Compx.decodeLightBrightness(l.brightness))%")
+        }
+        if let d = s.dpiLight {
+            print("DPI indicator: \(d.effectiveMode.label) (mode \(d.mode), brightness \(d.brightness), speed \(d.speed)); stage colours " + s.dpiColors.map { $0.name }.joined(separator: ", "))
+        }
+        print("Buttons:")
+        for slot in 0..<s.buttons.count {
+            print("  \(slot + 1): \(s.buttonLabel(slot))")
+        }
         if fw.mouse != nil || fw.dongle != nil {
             print("Firmware: mouse \(fw.mouse ?? "?"), dongle \(fw.dongle ?? "?")")
         }

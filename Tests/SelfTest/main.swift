@@ -47,5 +47,33 @@ check(s.pollingRateHz == 1000, "polling 1000")
 check(s.dpiStageCount == 3 && s.activeDpiStage == 1 && s.dpiStages == [800, 1600, 3200] && s.activeDpi == 1600, "dpi stages")
 check(s.liftOffDistanceMM == 2 && s.sleepMinutes == 30 && s.motionSync && !s.angleSnapping, "lod/sleep/flags")
 
+print("Buttons")
+check(ButtonAction.mouse(.left).record == [0x01, 0x01, 0x00, 0x53], "left click record 01 01 00 53")
+check(ButtonAction.fire(intervalMs: 20, times: 3).record == [0x04, 0x14, 0x03, 0x3a], "fire key record 04 14 03 3a (factory)")
+check(ButtonAction(record: [0x05, 0x00, 0x00, 0x50]) == .shortcut, "type 5 is a shortcut slot")
+check(ButtonAction(record: [0x0b, 0x02, 0x00, 0x48]) == .scroll(.down), "0b 02 is scroll down")
+for a in ButtonAction.simpleChoices { check(ButtonAction(record: a.record) == a, "round-trip \(a.label)") }
+
+print("Shortcuts")
+let factorySlot0: [UInt8] = [0x04, 0x80, 0x01, 0x00, 0x81, 0x52, 0x00, 0x40, 0x01, 0x00, 0x41, 0x52, 0x00, 0x29]
+let sc0 = Shortcut(record: factorySlot0)
+check(sc0 == Shortcut(modifiers: .control, key: 0x52) && sc0?.label == "⌃↑", "factory slot 0 decodes to ⌃↑")
+check(Shortcut(modifiers: .control, key: 0x52).record == factorySlot0, "⌃↑ encodes byte-for-byte like the factory")
+check(Shortcut(record: [0x02, 0x81, 0x57, 0x00, 0x41, 0x57, 0x00, 0xe3]) == Shortcut(modifiers: [], key: 0x57), "single key slot (keypad +)")
+check(Shortcut(media: 0x00cd).record == [0x02, 0x82, 0xcd, 0x00, 0x42, 0xcd, 0x00, 0xf5], "play/pause media record")
+check(Shortcut(record: [0xff, 0xff]) == nil && Shortcut(record: [0x00]) == nil, "empty slots decode to nil")
+let combo = Shortcut(modifiers: [.command, .shift], key: 0x04)
+check(Shortcut(record: combo.record) == combo && combo.label == "⇧⌘A", "⇧⌘A round-trip")
+check(HIDKeys.usage(forMacKeyCode: 0) == 0x04 && HIDKeys.usage(forName: "f5") == 0x3e, "key tables")
+
+print("Lights")
+var lightFlash = [UInt8](repeating: 0xff, count: Compx.Flash.readEnd)
+lightFlash.replaceSubrange(0xa0..<0xa9, with: [0x04, 0xff, 0x00, 0x00, 0x13, 0xff, 0x40, 0x00, 0x55])
+let light = LightSettings(flash: lightFlash)
+check(light?.mode == 4 && light?.color == RGB(255, 0, 0) && light?.speed == 0x13 && light?.brightness == 0xff && light?.enabled == false, "factory light block parses")
+check(light?.record == [0x04, 0xff, 0x00, 0x00, 0x13, 0xff, 0x40], "light record checksum 0x40")
+check(RGB(hex: "#ff8000") == RGB(255, 128, 0) && RGB(255, 0, 0).record == [0xff, 0, 0, 0x56], "rgb parsing and record")
+check(Compx.encodeLightBrightness(percent: 100) == 0xff && Compx.decodeLightBrightness(0x80) == 50, "brightness scale")
+
 print(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)

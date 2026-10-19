@@ -74,9 +74,21 @@ public final class CompxTransport {
 
     private final class Waiter {
         let command: UInt8
+        /// Flash address the reply must echo (read/write commands), so a reply
+        /// meant for another process talking to the same mouse is not taken.
+        let address: (UInt8, UInt8)?
         let semaphore = DispatchSemaphore(value: 0)
         var response: [UInt8]?
-        init(command: UInt8) { self.command = command }
+        init(frame: [UInt8]) {
+            command = frame[1]
+            let flash = [Compx.Command.readFlash.rawValue, Compx.Command.writeFlash.rawValue]
+            address = flash.contains(frame[1]) ? (frame[3], frame[4]) : nil
+        }
+        func matches(_ reply: [UInt8]) -> Bool {
+            guard reply[1] == command else { return false }
+            if let a = address { return reply[3] == a.0 && reply[4] == a.1 }
+            return true
+        }
     }
 
     public init() {
@@ -184,7 +196,7 @@ public final class CompxTransport {
             onDeviceEvent?(frame)
         }
         lock.lock()
-        if let pending = waiter, pending.command == frame[1] {
+        if let pending = waiter, pending.matches(frame) {
             pending.response = frame
             waiter = nil
             lock.unlock()
@@ -205,7 +217,7 @@ public final class CompxTransport {
             lock.unlock()
             throw CompxError.noDevice
         }
-        let pending = Waiter(command: frame[1])
+        let pending = Waiter(frame: frame)
         waiter = pending
         lock.unlock()
         defer {

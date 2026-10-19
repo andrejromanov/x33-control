@@ -49,6 +49,22 @@ public enum Compx {
         public static let dpiValues = 0x0c
         public static let dpiRecordSize = 4
         public static let maxDpiStages = 8
+        /// Per-stage indicator colour: 4-byte records [r g b checksum].
+        public static let dpiColors = 0x2c
+        /// DPI indicator light: 0 off, 1 steady, 2 breathing.
+        public static let dpiLightMode = 0x4c
+        public static let dpiLightBrightness = 0x4e
+        public static let dpiLightSpeed = 0x50
+        public static let dpiLightState = 0x52
+        /// Button table: 16 records of 4 bytes, see `ButtonAction`.
+        public static let keyFunction = 0x60
+        public static let buttonSlots = 16
+        /// Decorative light: [mode r g b speed brightness checksum].
+        public static let light = 0xa0
+        public static let lightState = 0xa7
+        /// Keyboard shortcut slots, 32 bytes each, one per button slot.
+        public static let shortcutBase = 0x100
+        public static let shortcutStride = 0x20
         public static let debounceTime = 0xa9
         public static let motionSync = 0xab
         public static let sleepTime = 0xad
@@ -66,6 +82,17 @@ public enum Compx {
     public static let dpiMin = 50
     public static let dpiMax = 26000
     public static let dpiStep = 50
+    /// Decorative light speed presets (raw byte; lower is faster).
+    public static let lightSpeeds: [(label: String, value: UInt8)] = [("Slow", 0xbe), ("Medium", 0x80), ("Fast", 0x46), ("Fastest", 0x13)]
+    /// Decorative light brightness presets (percent → raw byte).
+    public static let lightBrightnessPercents = [25, 50, 75, 100]
+    public static func encodeLightBrightness(percent: Int) -> UInt8 {
+        let p = min(max(percent, 0), 100)
+        return p >= 100 ? 0xff : UInt8(p * 255 / 100)
+    }
+    public static func decodeLightBrightness(_ raw: UInt8) -> Int {
+        raw == 0xff ? 100 : Int(raw) * 100 / 255
+    }
 
     public static func checksum<C: Collection>(_ bytes: C) -> UInt8 where C.Element == UInt8 {
         let sum = bytes.reduce(0) { $0 &+ Int($1) }
@@ -154,6 +181,99 @@ public struct BatteryStatus: Equatable {
     public var volts: Double { Double(millivolts) / 1000 }
 }
 
+public struct RGB: Equatable {
+    public var red: UInt8, green: UInt8, blue: UInt8
+    public init(_ red: UInt8, _ green: UInt8, _ blue: UInt8) { self.red = red; self.green = green; self.blue = blue }
+    public init?(hex: String) {
+        let h = hex.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "")
+        guard h.count == 6, let v = Int(h, radix: 16) else { return nil }
+        self.init(UInt8(v >> 16 & 0xff), UInt8(v >> 8 & 0xff), UInt8(v & 0xff))
+    }
+    public var hex: String { String(format: "%02X%02X%02X", red, green, blue) }
+    public var record: [UInt8] { [red, green, blue, Compx.checksum([red, green, blue])] }
+    public static let presets: [(name: String, color: RGB)] = [
+        ("Red", RGB(255, 0, 0)), ("Orange", RGB(255, 96, 0)), ("Yellow", RGB(255, 255, 0)), ("Green", RGB(0, 255, 0)),
+        ("Cyan", RGB(0, 255, 255)), ("Blue", RGB(0, 0, 255)), ("Purple", RGB(128, 0, 255)), ("Magenta", RGB(255, 0, 255)),
+        ("White", RGB(255, 255, 255)),
+    ]
+    public var name: String { RGB.presets.first { $0.color == self }?.name ?? "#" + hex }
+}
+
+/// Decorative (logo / side) light. Mode numbers follow the Redragon/E-Yooso
+/// firmware family (open-m711pro): 0 streaming, 1 breathing, 2 steady, 3 neon, 4 off.
+public struct LightSettings: Equatable {
+    public enum Mode: UInt8, CaseIterable {
+        case streaming = 0, breathing = 1, steady = 2, neon = 3, off = 4
+        public var label: String {
+            switch self {
+            case .streaming: return "Rainbow Wave"
+            case .breathing: return "Breathing"
+            case .steady: return "Steady"
+            case .neon: return "Neon"
+            case .off: return "Off"
+            }
+        }
+        /// Whether the colour matters in this mode.
+        public var usesColor: Bool { self == .breathing || self == .steady }
+    }
+
+    public var mode: UInt8
+    public var color: RGB
+    public var speed: UInt8
+    public var brightness: UInt8
+    public var enabled: Bool
+
+    public init(mode: UInt8, color: RGB, speed: UInt8, brightness: UInt8, enabled: Bool) {
+        self.mode = mode; self.color = color; self.speed = speed; self.brightness = brightness; self.enabled = enabled
+    }
+
+    public init?(flash: [UInt8]) {
+        let a = Compx.Flash.light
+        guard flash.count > Compx.Flash.lightState, flash[a] != 0xff else { return nil }
+        mode = flash[a]
+        color = RGB(flash[a + 1], flash[a + 2], flash[a + 3])
+        speed = flash[a + 4]
+        brightness = flash[a + 5]
+        enabled = flash[Compx.Flash.lightState] == 1
+    }
+
+    public var knownMode: Mode? { Mode(rawValue: mode) }
+    public var isOn: Bool { enabled && knownMode != .off }
+    public var record: [UInt8] {
+        let b = [mode, color.red, color.green, color.blue, speed, brightness]
+        return b + [Compx.checksum(b)]
+    }
+    public var modeLabel: String { knownMode?.label ?? "Mode \(mode)" }
+}
+
+/// The small LED that shows the active DPI stage colour.
+public struct DpiLightSettings: Equatable {
+    public enum Mode: UInt8, CaseIterable {
+        case off = 0, steady = 1, breathing = 2
+        public var label: String {
+            switch self {
+            case .off: return "Off"
+            case .steady: return "Steady"
+            case .breathing: return "Breathing"
+            }
+        }
+    }
+    public var mode: UInt8
+    public var brightness: UInt8
+    public var speed: UInt8
+    public var enabled: Bool
+
+    public init?(flash: [UInt8]) {
+        guard flash.count > Compx.Flash.dpiLightState, flash[Compx.Flash.dpiLightMode] != 0xff else { return nil }
+        mode = flash[Compx.Flash.dpiLightMode]
+        brightness = flash[Compx.Flash.dpiLightBrightness]
+        speed = flash[Compx.Flash.dpiLightSpeed]
+        enabled = flash[Compx.Flash.dpiLightState] == 1
+    }
+
+    public var effectiveMode: Mode { enabled ? (Mode(rawValue: mode) ?? .steady) : .off }
+}
+
 public struct MouseSettings: Equatable {
     public var pollingRateHz: Int?
     public var dpiStageCount: Int
@@ -168,6 +288,12 @@ public struct MouseSettings: Equatable {
     public var supportsSleepTimer = true
     public var supportsDebounce = true
     public var supportsLiftOff = true
+    public var buttons: [ButtonAction]
+    /// Keys stored for buttons set to `.shortcut`, by slot. Filled by the controller.
+    public var shortcuts: [Int: Shortcut] = [:]
+    public var light: LightSettings?
+    public var dpiLight: DpiLightSettings?
+    public var dpiColors: [RGB]
     public var raw: [UInt8]
 
     public init(flash: [UInt8]) {
@@ -193,6 +319,25 @@ public struct MouseSettings: Equatable {
         supportsLiftOff = byte(Compx.Flash.liftOffDistance) != 0xff
         angleSnapping = byte(Compx.Flash.angleSnapping) == 1
         rippleControl = byte(Compx.Flash.rippleControl) == 1
+        buttons = (0..<Compx.Flash.buttonSlots).map { slot in
+            let start = Compx.Flash.keyFunction + slot * 4
+            guard start + 4 <= flash.count else { return .disabled }
+            return ButtonAction(record: Array(flash[start..<start + 4]))
+        }
+        light = LightSettings(flash: flash)
+        dpiLight = DpiLightSettings(flash: flash)
+        dpiColors = (0..<dpiStageCount).map { stage in
+            let start = Compx.Flash.dpiColors + stage * 4
+            guard start + 3 <= flash.count else { return RGB(0, 0, 0) }
+            return RGB(flash[start], flash[start + 1], flash[start + 2])
+        }
+    }
+
+    /// Human-readable assignment of a slot, including shortcut keys when known.
+    public func buttonLabel(_ slot: Int) -> String {
+        guard slot < buttons.count else { return "?" }
+        if buttons[slot] == .shortcut, let sc = shortcuts[slot] { return sc.label }
+        return buttons[slot].label
     }
 
     public var activeDpi: Int? {

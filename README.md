@@ -30,6 +30,10 @@ make run       # install + launch
 `Package.swift` is included for Xcode / `swift build`; the Makefile does not
 use it.
 
+The app icon is `Packaging/icon.svg`. `Packaging/AppIcon.icns` is committed, so a
+normal build needs nothing extra; after editing the SVG run `make icon`, which
+needs `rsvg-convert` (`brew install librsvg`) and the system `iconutil`.
+
 ## Permission
 
 macOS treats the receiver as a keyboard (its config interface also carries a

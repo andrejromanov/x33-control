@@ -11,7 +11,7 @@ FRAMEWORKS = -framework IOKit -framework AppKit -framework ServiceManagement -fr
 SOURCES    = $(wildcard Sources/X33Control/*.swift)
 CORE       = $(filter-out Sources/X33Control/main.swift Sources/X33Control/AppDelegate.swift Sources/X33Control/CommandLineTool.swift,$(SOURCES))
 
-.PHONY: build test bundle install run clean cert
+.PHONY: build test bundle install run clean cert icon
 
 build: build/X33Control
 
@@ -24,9 +24,10 @@ test: $(CORE) Tests/SelfTest/main.swift
 	$(SWIFTC) -swift-version 5 -target arm64-apple-macosx13.0 -framework IOKit $(CORE) Tests/SelfTest/main.swift -o build/selftest
 	./build/selftest
 
-bundle: build/X33Control
+bundle: build/X33Control Packaging/AppIcon.icns
 	rm -rf "$(BUNDLE)"
-	mkdir -p "$(BUNDLE)/Contents/MacOS"
+	mkdir -p "$(BUNDLE)/Contents/MacOS" "$(BUNDLE)/Contents/Resources"
+	cp Packaging/AppIcon.icns "$(BUNDLE)/Contents/Resources/AppIcon.icns"
 	cp build/X33Control "$(BUNDLE)/Contents/MacOS/X33Control"
 	cp Packaging/Info.plist "$(BUNDLE)/Contents/Info.plist"
 	codesign --force --sign "$(SIGN_IDENTITY)" "$(BUNDLE)"
@@ -57,3 +58,15 @@ cert:
 	security add-trusted-cert -p codeSign -k ~/Library/Keychains/login.keychain-db cert.pem ; \
 	rm -rf $$tmp; \
 	security find-identity -v -p codesigning | grep "$(CERT_NAME)" || echo "import failed"
+
+# App icon: Packaging/icon.svg -> Packaging/AppIcon.icns (needs rsvg-convert, iconutil)
+ICONSET = build/AppIcon.iconset
+Packaging/AppIcon.icns: Packaging/icon.svg
+	rm -rf $(ICONSET) && mkdir -p $(ICONSET)
+	for s in 16 32 128 256 512; do \
+	  rsvg-convert -w $$s -h $$s Packaging/icon.svg -o $(ICONSET)/icon_$${s}x$${s}.png; \
+	  rsvg-convert -w $$((s*2)) -h $$((s*2)) Packaging/icon.svg -o $(ICONSET)/icon_$${s}x$${s}@2x.png; \
+	done
+	iconutil -c icns $(ICONSET) -o $@
+
+icon: Packaging/AppIcon.icns
